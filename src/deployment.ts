@@ -52,10 +52,16 @@ export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { githu
 
 export interface Deployment extends Machine {
   repository: string
-  github: { cli: string; login: string; noreply: string }
+  /** Present only while the GitHub Source is enabled; a disabled Source runs workers without GitHub credentials. */
+  github?: { cli: string; login: string; noreply: string }
   feishu?: FeishuBot
 }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
+/** The GitHub deployment when the GitHub Source is enabled; source code paths that only run while it is enabled may require it. */
+export function requireGithub(deployment: Pick<Deployment, 'github'>): NonNullable<Deployment['github']> {
+  if (!deployment.github) throw new Error('The GitHub Source is disabled')
+  return deployment.github
+}
 
 /** Resolve a command name or absolute path to an executable file, ignoring the worker shim directory. */
 export function executable(name: string, path: string, exclude?: string): string {
@@ -84,9 +90,11 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   return result.success ? result.data : undefined
 }
 /** Verify the agent's GitHub CLI identity and push access to the configured repository. */
-export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
+export async function resolveDeployment(machine: Machine, github: { enabled: boolean; config: unknown } | undefined, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
+  // A disabled GitHub Source removes the repository, agent CLI and account checks from setup, and workers run without GitHub credentials.
+  if (!github?.enabled) return { ...machine, repository: '', github: undefined }
   const { stateDir } = machine
-  const accounts = GithubAccountsSchema.parse(github ?? {})
+  const accounts = GithubAccountsSchema.parse(github.config ?? {})
   const remote = accounts.repository
   if (!remote) throw new SetupError('repositoryUnset')
   if (!accounts.cli) throw new SetupError('agentCliUnset')
