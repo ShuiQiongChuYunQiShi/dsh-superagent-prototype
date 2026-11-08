@@ -13,7 +13,7 @@ import { AgentDelivery, messageId } from './delivery.ts'
 import type { Effects } from './effects.ts'
 import type { Variable } from './execution-environment.ts'
 import { RetryHealth } from './retry-health.ts'
-import { initializeRoleModel } from './role-models.ts'
+import { initializeRoleModel, realignRoleModel } from './role-models.ts'
 import { bundledSkills } from './skill-files.ts'
 import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
@@ -148,6 +148,8 @@ export class Sessions {
     if ('error' in result) throw result.error
     const settings = this.host.store.settings()
     await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
+    // The orchestrator session is long-lived: re-align it so a model configured after its creation takes effect.
+    if (role === 'orchestrator') await realignRoleModel(ctx, result.agent, settings.eval.model)
     await this.decorate(result.agent)
     ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
