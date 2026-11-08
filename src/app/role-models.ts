@@ -43,16 +43,26 @@ export async function initializeRoleModel(ctx: Context, agent: Agent, model: Rol
   await ctx.sessionPersistence.flush()
 }
 
-/** Re-aligns an existing session's durable model selection with its role's configured model. A session created before its
- * role's model was configured keeps the stale selection it picked up from the global default; appending a fresh
- * `model/selection` event re-points its next request without touching the global DSH default. */
+/** Re-aligns an existing session's model routing with its role's configured model. A session created before its role's
+ * model was configured keeps routing through the global default (an appended `model/selection` event alone does not
+ * re-route an already-created session), so this re-registers the same request interception `initializeRoleModel` uses. */
 export async function realignRoleModel(ctx: Context, agent: Agent, model: RoleModel | null): Promise<void> {
   if (!model) return
   const selected = await resolveRoleModel(ctx, model)
-  const last = [...agent.session.snapshotEvents()].reverse().find(event => event.type === 'model/selection')
-  const current = last ? (last as { payload?: ModelSelection }).payload : undefined
-  if (current?.provider === selected.provider && current?.model === selected.model
-    && current?.reasoningEffort === selected.reasoningEffort) return
   agent.session.append('model/selection', selected)
+  agent.ctx.effect(() => {
+    const disposers = [
+      agent.ctx.on('agent/request', async (_payload, next) => {
+        const result = await next()
+        const { reasoningEffort: _inherited, ...rest } = result
+        return { ...rest, ...selected }
+      }, { prepend: true }),
+      agent.ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
+        const result = await next()
+        return { ...result, variables: { ...result.variables, provider: selected.provider, model: selected.model } }
+      }, { prepend: true }),
+    ]
+    return () => disposers.forEach(dispose => dispose())
+  })
   await ctx.sessionPersistence.flush()
 }
