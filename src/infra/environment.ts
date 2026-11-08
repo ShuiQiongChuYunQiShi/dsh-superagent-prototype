@@ -84,19 +84,30 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
   for (const name of before) { const file = join(dir, name); if (!await written(file)) throw new SetupError('foreignFile', { file }) }
   // Workers may be running concurrently: write each shim to a temp file and atomically rename it so no command ever resolves past the shim directory.
   const kept = new Set<string>()
+  const windows = process.platform === 'win32'
   const shim = async (name: string, body: string): Promise<void> => {
-    const temporary = join(dir, `.${name}.${process.pid}.tmp`)
-    await writeFile(temporary, `#!/bin/sh\n${MARKER}\n${body}\n`, { mode: 0o755 })
-    await rename(temporary, join(dir, name))
-    kept.add(name)
+    const file = windows ? `${name}.cmd` : name
+    const temporary = join(dir, `.${file}.${process.pid}.tmp`)
+    await writeFile(temporary, windows ? `@echo off\nrem ${MARKER}\n${body}\n` : `#!/bin/sh\n${MARKER}\n${body}\n`, { mode: windows ? 0o644 : 0o755 })
+    await rename(temporary, join(dir, file))
+    kept.add(file)
   }
-  const withoutShims = [
-    `self=${shellQuote(dir)}`, 'rest=', 'IFS=:', 'set -f',
-    'for entry in $PATH; do [ "$entry" = "$self" ] || rest="${rest:+$rest:}$entry"; done',
-    'set +f', 'unset IFS', 'PATH=$rest', 'export PATH',
-  ].join('\n')
-  const run = (program: string): string => `${withoutShims}\nexec ${shellQuote(program)} "$@"`
-  const fail = (message: string): string => `echo ${shellQuote(message)} >&2\nexit 1`
+  // The shim directory is first on PATH (see applyEnvironment); each shim strips it back off so a target resolved by
+  // name cannot re-enter the shims. cmd cannot loop over PATH portably, so the Windows shim replaces the literal
+  // directory segment out of PATH instead.
+  const withoutShims = windows
+    ? `set "PATH=%PATH:${dir};=%"`
+    : [
+      `self=${shellQuote(dir)}`, 'rest=', 'IFS=:', 'set -f',
+      'for entry in $PATH; do [ "$entry" = "$self" ] || rest="${rest:+$rest:}$entry"; done',
+      'set +f', 'unset IFS', 'PATH=$rest', 'export PATH',
+    ].join('\n')
+  const run = (program: string): string => windows
+    ? `${withoutShims}\ncall "${program}" %*\nexit /b %errorlevel%`
+    : `${withoutShims}\nexec ${shellQuote(program)} "$@"`
+  const fail = (message: string): string => windows
+    ? `echo ${message} 1>&2\nexit /b 1`
+    : `echo ${shellQuote(message)} >&2\nexit 1`
   await shim('gh', run(github.cli))
   await shim('lark-cli', feishu ? run(feishu.cli) : fail('lark-cli is unavailable: this installation has no Feishu bot.'))
   for (const name of new Set(blockedCommands.filter(name => !WORKER_COMMANDS.includes(name)))) {
